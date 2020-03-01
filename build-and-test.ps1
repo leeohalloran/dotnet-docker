@@ -1,72 +1,66 @@
 #!/usr/bin/env pwsh
-[cmdletbinding()]
 param(
+    # Version of .NET Core to filter by
     [string]$VersionFilter = "*",
-    [string]$OSFilter = "*",
-    [string]$ArchitectureFilter = "amd64",
-    [string]$ImageBuilderCustomArgs,
-    [switch]$SkipTesting = $false
+
+    # Name of OS to filter by
+    [string]$OSFilter,
+
+    # Type of architecture to filter by
+    [string]$ArchitectureFilter,
+
+    # Additional custom path filters (overrides VersionFilter)
+    [string]$PathFilters,
+
+    # Additional args to pass to ImageBuilder
+    [string]$OptionalImageBuilderArgs,
+
+    # Execution mode of the script
+    [ValidateSet("BuildAndTest", "Build", "Test")]
+    [string]$Mode = "BuildAndTest",
+
+    # Categories of tests to run
+    [ValidateSet("runtime", "runtime-deps", "aspnet", "sdk", "sample", "image-size")]
+    [string[]]$TestCategories = @("runtime", "runtime-deps", "aspnet", "sdk", "sample", "image-size")
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+if ($Mode -eq "BuildAndTest" -or $Mode -eq "Build") {
+    # Build the product images
+    & ./eng/common/build.ps1 `
+        -VersionFilter $VersionFilter `
+        -OSFilter $OSFilter `
+        -ArchitectureFilter $ArchitectureFilter `
+        -PathFilters $PathFilters `
+        -OptionalImageBuilderArgs $OptionalImageBuilderArgs
 
-function Log {
-    param ([string] $Message)
-
-    Write-Output $Message
-}
-
-function Exec {
-    param ([string] $Cmd)
-
-    Log "Executing: '$Cmd'"
-    Invoke-Expression $Cmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed: '$Cmd'"
-    }
-}
-
-$windowsImageBuilder = 'microsoft/dotnet-buildtools-prereqs:image-builder-nanoserver-20190102125354'
-$linuxImageBuilder = 'microsoft/dotnet-buildtools-prereqs:image-builder-debian-20190102205300'
-$imageBuilderContainerName = "ImageBuilder-$(Get-Date -Format yyyyMMddhhmmss)"
-
-pushd $PSScriptRoot
-try {
     $activeOS = docker version -f "{{ .Server.Os }}"
-    if ($activeOS -eq "linux") {
-        # On Linux, ImageBuilder is run within a container.  The local repo is copied into a Docker volume
-        # in order to support running with a remote Docker server.
-        ./scripts/Invoke-WithRetry "docker pull $linuxImageBuilder"
-        $repoVolume = "repo-$(Get-Date -Format yyyyMMddhhmmss)"
-        Exec "docker create -v ${repoVolume}:/repo --name $imageBuilderContainerName $linuxImageBuilder"
-        Exec "docker cp ${PSScriptRoot}/. ${imageBuilderContainerName}:/repo"
-        Exec "docker container rm -f $imageBuilderContainerName"
-        $imageBuilderCmd = "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v ${repoVolume}:/repo -w /repo $linuxImageBuilder"
-    }
-    else {
-        # On Windows, ImageBuild is run locally due to limitations with running Docker client within a container.
-        $imageBuilderFolder = [System.IO.Path]::Combine($PSScriptRoot, ".Microsoft.DotNet.ImageBuilder")
-        $imageBuilderCmd = [System.IO.Path]::Combine($imageBuilderFolder, "image-builder", "Microsoft.DotNet.ImageBuilder.exe")
-        if (-not (Test-Path -Path "$imageBuilderCmd" -PathType Leaf)) {
-            ./scripts/Invoke-WithRetry "docker pull $windowsImageBuilder"
-            Exec "docker create --name $imageBuilderContainerName $windowsImageBuilder"
-            New-Item -Path "$imageBuilderFolder" -ItemType Directory -Force
-            Exec "docker cp ${imageBuilderContainerName}:/image-builder $imageBuilderFolder"
-            Exec "docker container rm -f $imageBuilderContainerName"
-        }
+    if ($activeOS -eq "windows" -and -not $OSFilter) {
+        Write-Host "Setting OSFilter to match local Windows host version"
+        $windowsReleaseId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").ReleaseId
+        $OSFilter = "nanoserver-$windowsReleaseId"
     }
 
-    Exec "$imageBuilderCmd build --path '$VersionFilter/*/$OSFilter/$ArchitectureFilter' $ImageBuilderCustomArgs"
-
-    if ($activeOS -eq "linux") {
-        Exec "docker volume rm -f $repoVolume"
-    }
-
-    if (-not $SkipTesting) {
-        ./tests/run-tests.ps1 -VersionFilter $VersionFilter -ArchitectureFilter $ArchitectureFilter -OSFilter $OSFilter -IsLocalRun
-    }
+    # Build the sample images
+    & ./eng/common/build.ps1 `
+        -VersionFilter $VersionFilter `
+        -OSFilter $OSFilter `
+        -ArchitectureFilter $ArchitectureFilter `
+        -PathFilters $PathFilters `
+        -OptionalImageBuilderArgs $OptionalImageBuilderArgs `
+        -Manifest manifest.samples.json
 }
-finally {
-    popd
+if ($Mode -eq "BuildAndTest" -or $Mode -eq "Test") {
+
+    $localTestCategories = $TestCategories
+
+    if ($VersionFilter -ne "*" -and $TestCategories.Contains("sample")) {
+        $localTestCategories = $TestCategories | where { $_ -ne "sample"}
+        Write-Warning "Skipping sample image testing since VersionFilter was set"
+    }
+
+    & ./tests/run-tests.ps1 `
+        -VersionFilter $VersionFilter `
+        -OSFilter $OSFilter `
+        -ArchitectureFilter $ArchitectureFilter `
+        -TestCategories $localTestCategories
 }

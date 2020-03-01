@@ -1,5 +1,5 @@
-ARG REPO=microsoft/dotnet
-FROM $REPO:2.1-runtime-deps-stretch-slim-arm32v7
+ARG REPO=mcr.microsoft.com/dotnet/core/runtime-deps
+FROM $REPO:2.1-stretch-slim-arm32v7
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -7,10 +7,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install .NET Core
-ENV DOTNET_VERSION 2.1.8
+ENV DOTNET_VERSION 2.1.16
 
-RUN curl -SL --output dotnet.tar.gz https://dotnetcli.blob.core.windows.net/dotnet/Runtime/$DOTNET_VERSION/dotnet-runtime-$DOTNET_VERSION-linux-arm.tar.gz \
-    && dotnet_sha512='948b61f5618c41ca29f29e19ae6fd09eecb172f9b1227d180ee64622bbbeebc94a344d5f089923384fe5c6cf9585d90b5ba03631679d560c5cab1f13da41a7df' \
+RUN curl -SL --output dotnet.tar.gz https://dotnetcli.azureedge.net/dotnet/Runtime/$DOTNET_VERSION/dotnet-runtime-$DOTNET_VERSION-linux-arm.tar.gz \
+    && dotnet_sha512='a3cbe1c4dc562797c15b880803b0bde2ce4606d31e91b6d9c460e303a4809ddd499051a89add8fc419a41e0b8cacc46866e0b6525a4fa12b8fa02bd5e15230de' \
     && echo "$dotnet_sha512 dotnet.tar.gz" | sha512sum -c - \
     && mkdir -p /usr/share/dotnet \
     && tar -zxf dotnet.tar.gz -C /usr/share/dotnet \

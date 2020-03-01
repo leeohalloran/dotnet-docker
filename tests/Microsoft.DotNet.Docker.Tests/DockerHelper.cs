@@ -13,8 +13,10 @@ namespace Microsoft.DotNet.Docker.Tests
     public class DockerHelper
     {
         public static string DockerOS => GetDockerOS();
+        public static string DockerArchitecture => GetDockerArch();
         public static string ContainerWorkDir => IsLinuxContainerModeEnabled ? "/sandbox" : "c:\\sandbox";
         public static bool IsLinuxContainerModeEnabled => string.Equals(DockerOS, "linux", StringComparison.OrdinalIgnoreCase);
+
         private ITestOutputHelper OutputHelper { get; set; }
 
         public DockerHelper(ITestOutputHelper outputHelper)
@@ -27,6 +29,7 @@ namespace Microsoft.DotNet.Docker.Tests
             string dockerfile = null,
             string target = null,
             string contextDir = ".",
+            bool pull = false,
             params string[] buildArgs)
         {
             string buildArgsOption = string.Empty;
@@ -40,8 +43,9 @@ namespace Microsoft.DotNet.Docker.Tests
 
             string targetArg = target == null ? string.Empty : $" --target {target}";
             string dockerfileArg = dockerfile == null ? string.Empty : $" -f {dockerfile}";
+            string pullArg = pull ? " --pull" : string.Empty;
 
-            ExecuteWithLogging($"build -t {tag}{targetArg}{buildArgsOption}{dockerfileArg} {contextDir}");
+            ExecuteWithLogging($"build -t {tag}{targetArg}{buildArgsOption}{dockerfileArg}{pullArg} {contextDir}");
         }
 
         public static bool ContainerExists(string name) => ResourceExists("container", $"-f \"name={name}\"");
@@ -85,7 +89,9 @@ namespace Microsoft.DotNet.Docker.Tests
             if (!ignoreErrors && result.Process.ExitCode != 0)
             {
                 ProcessStartInfo startInfo = result.Process.StartInfo;
-                string msg = $"Failed to execute {startInfo.FileName} {startInfo.Arguments}{Environment.NewLine}{result.StdErr}";
+                string msg = $"Failed to execute {startInfo.FileName} {startInfo.Arguments}" +
+                    $"{Environment.NewLine}Exit code: {result.Process.ExitCode}" +
+                    $"{Environment.NewLine}Standard Error: {result.StdErr}";
                 throw new InvalidOperationException(msg);
             }
 
@@ -180,6 +186,7 @@ namespace Microsoft.DotNet.Docker.Tests
         }
 
         private static string GetDockerOS() => Execute("version -f \"{{ .Server.Os }}\"");
+        private static string GetDockerArch() => Execute("version -f \"{{ .Server.Arch }}\"");
 
         public string GetContainerAddress(string container) =>
             ExecuteWithLogging("inspect -f \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" " + container);
@@ -204,22 +211,22 @@ namespace Microsoft.DotNet.Docker.Tests
             return output != "";
         }
 
-        public void Run(
+        public string Run(
             string image,
             string name,
             string command = null,
             string workdir = null,
-            string publishArgs = " -p 80",
+            string optionalRunArgs = null,
             bool detach = false,
             bool runAsContainerAdministrator = false,
             bool skipAutoCleanup = false)
         {
             string cleanupArg = skipAutoCleanup ? string.Empty : " --rm";
-            string commandArg = command == null ? string.Empty : $" {command}";
             string detachArg = detach ? " -d -t" : string.Empty;
             string userArg = runAsContainerAdministrator ? " -u ContainerAdministrator" : string.Empty;
             string workdirArg = workdir == null ? string.Empty : $" -w {workdir}";
-            ExecuteWithLogging($"run --name {name}{cleanupArg}{workdirArg}{userArg}{detachArg}{publishArgs} {image}{commandArg}");
+            return ExecuteWithLogging(
+                $"run --name {name}{cleanupArg}{workdirArg}{userArg}{detachArg} {optionalRunArgs} {image} {command}");
         }
     }
 }

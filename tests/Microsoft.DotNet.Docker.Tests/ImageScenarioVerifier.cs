@@ -8,20 +8,19 @@ using System.IO;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Xunit.Abstractions;
-using static Microsoft.DotNet.Docker.Tests.ImageVersion;
 
 namespace Microsoft.DotNet.Docker.Tests
 {
     public class ImageScenarioVerifier
     {
         private readonly DockerHelper _dockerHelper;
-        private readonly ImageData _imageData;
+        private readonly ProductImageData _imageData;
         private readonly bool _isWeb;
         private readonly ITestOutputHelper _outputHelper;
         private readonly string _testArtifactsDir = Path.Combine(Directory.GetCurrentDirectory(), "TestAppArtifacts");
 
         public ImageScenarioVerifier(
-            ImageData imageData,
+            ProductImageData imageData,
             DockerHelper dockerHelper,
             ITestOutputHelper outputHelper,
             bool isWeb = false)
@@ -39,7 +38,7 @@ namespace Microsoft.DotNet.Docker.Tests
 
             try
             {
-                if (_imageData.HasSdk)
+                if (!_imageData.HasCustomSdk)
                 {
                     // Use `sdk` image to build and run test app
                     string buildTag = BuildTestAppImage("build", appDir);
@@ -48,10 +47,10 @@ namespace Microsoft.DotNet.Docker.Tests
                     await RunTestAppImage(buildTag, command: $"dotnet run{dotnetRunArgs}");
                 }
 
-                // Use `sdk` image to publish FX dependent app and run with `runtime` or `aspnetcore-runtime` image
+                // Use `sdk` image to publish FX dependent app and run with `runtime` or `aspnet` image
                 string fxDepTag = BuildTestAppImage("fx_dependent_app", appDir);
                 tags.Add(fxDepTag);
-                bool runAsAdmin = _isWeb && !DockerHelper.IsLinuxContainerModeEnabled && _imageData.OS != OS.NanoServerSac2016;
+                bool runAsAdmin = _isWeb && !DockerHelper.IsLinuxContainerModeEnabled;
                 await RunTestAppImage(fxDepTag, runAsAdmin: runAsAdmin);
 
                 if (DockerHelper.IsLinuxContainerModeEnabled)
@@ -69,21 +68,6 @@ namespace Microsoft.DotNet.Docker.Tests
             }
         }
 
-        private static void ApplyProjectCustomizations(ImageData _imageData, string projectFilePath)
-        {
-            if (_imageData.Version == V1_1)
-            {
-                string projectFile = File.ReadAllText(projectFilePath);
-                string runtimeFrameworkVersionProperty = @"
-  <PropertyGroup>
-    <RuntimeFrameworkVersion>1.1.*</RuntimeFrameworkVersion>
-  </PropertyGroup>
-</Project>";
-                projectFile = projectFile.Replace("</Project>", runtimeFrameworkVersionProperty);
-                File.WriteAllText(projectFilePath, projectFile);
-            }
-        }
-
         private string BuildTestAppImage(string stageTarget, string contextDir, params string[] customBuildArgs)
         {
             string tag = _imageData.GetIdentifier(stageTarget);
@@ -91,7 +75,7 @@ namespace Microsoft.DotNet.Docker.Tests
             List<string> buildArgs = new List<string>();
             buildArgs.Add($"sdk_image={_imageData.GetImage(DotNetImageType.SDK, _dockerHelper)}");
 
-            DotNetImageType runtimeImageType = _isWeb ? DotNetImageType.AspNetCore_Runtime : DotNetImageType.Runtime;
+            DotNetImageType runtimeImageType = _isWeb ? DotNetImageType.Aspnet : DotNetImageType.Runtime;
             buildArgs.Add($"runtime_image={_imageData.GetImage(runtimeImageType, _dockerHelper)}");
 
             if (DockerHelper.IsLinuxContainerModeEnabled)
@@ -123,16 +107,23 @@ namespace Microsoft.DotNet.Docker.Tests
                 _dockerHelper.Run(
                     image: _imageData.GetImage(DotNetImageType.SDK, _dockerHelper),
                     name: containerName,
-                    command: $"dotnet new {appType} --framework netcoreapp{_imageData.Version}",
+                    command: $"dotnet new {appType} --framework netcoreapp{_imageData.Version} --no-restore",
                     workdir: "/app",
                     skipAutoCleanup: true);
 
                 _dockerHelper.Copy($"{containerName}:/app", appDir);
 
-                ApplyProjectCustomizations(_imageData, Path.Combine(appDir, "app.csproj"));
+                string sourceDockerfileName = $"Dockerfile.{DockerHelper.DockerOS.ToLower()}";
+
+                // TODO: Remove Windows arm workaround once underlying Windows/Docker issue is resolved
+                // https://github.com/dotnet/dotnet-docker/issues/1054
+                if (!DockerHelper.IsLinuxContainerModeEnabled && _imageData.Arch == Arch.Arm)
+                {
+                    sourceDockerfileName += $".{Enum.GetName(typeof(Arch), _imageData.Arch).ToLowerInvariant()}";
+                }
 
                 File.Copy(
-                    Path.Combine(_testArtifactsDir, $"Dockerfile.{DockerHelper.DockerOS.ToLower()}"),
+                    Path.Combine(_testArtifactsDir, sourceDockerfileName),
                     Path.Combine(appDir, "Dockerfile"));
 
                 string nuGetConfigFileName = "NuGet.config";
@@ -142,6 +133,7 @@ namespace Microsoft.DotNet.Docker.Tests
                 }
 
                 File.Copy(Path.Combine(_testArtifactsDir, nuGetConfigFileName), Path.Combine(appDir, "NuGet.config"));
+                File.Copy(Path.Combine(_testArtifactsDir, ".dockerignore"), Path.Combine(appDir, ".dockerignore"));
             }
             catch (Exception)
             {
@@ -170,12 +162,13 @@ namespace Microsoft.DotNet.Docker.Tests
                     image: image,
                     name: containerName,
                     detach: _isWeb,
+                    optionalRunArgs: _isWeb ? "-p 80" : string.Empty,
                     runAsContainerAdministrator: runAsAdmin,
                     command: command);
 
                 if (_isWeb && !Config.IsHttpVerificationDisabled)
                 {
-                    await VerifyHttpResponseFromContainer(containerName);
+                    await VerifyHttpResponseFromContainerAsync(containerName, _dockerHelper, _outputHelper);
                 }
             }
             finally
@@ -184,14 +177,14 @@ namespace Microsoft.DotNet.Docker.Tests
             }
         }
 
-        private async Task VerifyHttpResponseFromContainer(string containerName)
+        public static async Task VerifyHttpResponseFromContainerAsync(string containerName, DockerHelper dockerHelper, ITestOutputHelper outputHelper)
         {
             var retries = 30;
 
             // Can't use localhost when running inside containers or Windows.
             var url = !Config.IsRunningInContainer && DockerHelper.IsLinuxContainerModeEnabled
-                ? $"http://localhost:{_dockerHelper.GetContainerHostPort(containerName)}"
-                : $"http://{_dockerHelper.GetContainerAddress(containerName)}";
+                ? $"http://localhost:{dockerHelper.GetContainerHostPort(containerName)}"
+                : $"http://{dockerHelper.GetContainerAddress(containerName)}";
 
             using (HttpClient client = new HttpClient())
             {
@@ -204,7 +197,7 @@ namespace Microsoft.DotNet.Docker.Tests
                     {
                         using (HttpResponseMessage result = await client.GetAsync(url))
                         {
-                            _outputHelper.WriteLine($"HTTP {result.StatusCode}\n{(await result.Content.ReadAsStringAsync())}");
+                            outputHelper.WriteLine($"HTTP {result.StatusCode}\n{(await result.Content.ReadAsStringAsync())}");
                             result.EnsureSuccessStatusCode();
                         }
 
@@ -212,7 +205,7 @@ namespace Microsoft.DotNet.Docker.Tests
                     }
                     catch (Exception ex)
                     {
-                        _outputHelper.WriteLine($"Request to {url} failed - retrying: {ex.ToString()}");
+                        outputHelper.WriteLine($"Request to {url} failed - retrying: {ex.ToString()}");
                     }
                 }
             }
